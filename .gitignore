@@ -1,0 +1,159 @@
+# Qt-specific files
+*.pro.user
+*.pro.user.*
+*.qbs.user
+*.qbs.user.*
+*.moc
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.qmlc
+*.jsc
+Makefile*
+*build-*
+
+# Qt build directories
+build/
+build-*/
+debug/
+release/
+
+# Object files
+*.obj
+*.so
+*.dylib
+*.a
+*.lib
+
+# Do not commit compiled executables and DLLs
+*.exe
+*.dll
+*.app
+PurgeX
+
+
+# Temporary files
+*~
+*.swp
+*.swo
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# IDE files
+.vscode/
+.idea/
+*.vcxproj*
+*.sln
+*.suo
+*.user
+*.ncb
+*.aps
+*.plg
+*.opt
+*.clw
+*.pdb
+*.idb
+
+# System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Log files
+*.log
+*.txt
+logs/
+PurgeXLogs/
+
+# Generated certificates and keys
+*.pem
+*.key
+*.crt
+certificates/
+certs/
+
+# Backup and temporary wipe files
+purgex_temp_*
+*.purgex_backup
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+
+# qmake generated files
+Makefile
+Makefile.Debug
+Makefile.Release
+
+# Visual Studio
+*.vcproj
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sdf
+*.opensdf
+*.db
+*.ipch
+*.pch
+*.pdb
+*.sbr
+*.tlb
+*.tli
+*.tlh
+*.tmp_proj
+*.vspscc
+*.vssscc
+.builds
+*.pidb
+*.svclog
+*.scc
+
+# MinGW
+*.exe.manifest
+*.exe.intermediate.manifest
+
+# Testing
+test_results/
+*.test
+
+# Documentation build
+docs/_build/
+site/
+
+# Package files
+*.deb
+*.rpm
+*.pkg
+*.dmg
+*.msi
+
+# Android (for future Android support)
+*.apk
+*.ap_
+*.dex
+local.properties
+
+# Ignore certificate test files
+test_certificate.*
+sample_data/
+
+# Ignore any user-specific configuration
+config.ini
+settings.conf
+
+# Ignore random folder
+random/
+
+# Generated qmake files
+.qmake.stash
+object_script.*
