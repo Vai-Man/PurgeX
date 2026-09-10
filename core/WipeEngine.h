@@ -49,6 +49,24 @@ struct WipeConfig {
     bool generateCertificate;
 };
 
+// ---------------------------------------------------------------------------
+// VerificationResult — result of a post-wipe verification pass
+// ---------------------------------------------------------------------------
+struct VerificationResult {
+    bool    performed        = false;
+    qint64  sectorsChecked   = 0;
+    qint64  sectorsVerified  = 0;
+    qint64  sectorsFailed    = 0;
+    bool    isSSD            = false;
+    bool    passed           = false;
+    QString note; // Limitation note (e.g. SSD wear-leveling caveat)
+
+    // Human-readable operation type for certificates
+    // Possible values: "host-level-overwrite", "filesystem-wipe",
+    //                  "free-space-wipe", "verified-host-level-overwrite"
+    QString operationType;
+};
+
 class WipeEngine : public QObject {
     Q_OBJECT
 
@@ -84,6 +102,7 @@ signals:
     void progress(int percentage, const QString &status);
     void finished(bool success, const QString &message);
     void warning(const QString &message);
+    void verificationComplete(const VerificationResult &result);
 
 private:
     
@@ -91,6 +110,10 @@ public:
     bool performWipe(const WipeConfig &config);
     bool overwriteFile(const QString &filePath, WipePattern pattern, int passes);
     bool overwriteWithPattern(QFile &file, WipePattern pattern, int pass);
+
+    // Post-wipe verification
+    VerificationResult verifyFile(const QString &filePath, WipePattern pattern);
+    VerificationResult verifyFreeSpace(const QString &drive, WipePattern pattern);
     void randomizeFileTimes(const QString &filePath);
     
     std::atomic<bool> running{false};

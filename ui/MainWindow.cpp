@@ -1,4 +1,6 @@
 #include "MainWindow.h"
+#include "ForensicWidget.h"
+#include "AuditWidget.h"
 #include <QApplication>
 #include <QMenuBar>
 #include <QStatusBar>
@@ -125,11 +127,15 @@ void MainWindow::setupUI() {
     advancedWidget = new AdvancedWidget(this);
     driveWidget = new DriveWidget(this, wipeEngine);
     certificateWidget = new CertificateWidget(this);
+    forensicWidget = new ForensicWidget(this);
+    auditWidget    = new AuditWidget(this);
     
-    tabWidget->addTab(oneClickWidget, "One-Click Wipe");
-    tabWidget->addTab(advancedWidget, "Advanced Mode");
-    tabWidget->addTab(driveWidget, "Drive Wiping");
+    tabWidget->addTab(oneClickWidget,    "One-Click Wipe");
+    tabWidget->addTab(advancedWidget,    "Advanced Mode");
+    tabWidget->addTab(driveWidget,       "Drive Wiping");
+    tabWidget->addTab(forensicWidget,    "File Recovery");
     tabWidget->addTab(certificateWidget, "Certificates");
+    tabWidget->addTab(auditWidget,       "Audit History");
     
     mainLayout->addWidget(tabWidget);
     
@@ -298,9 +304,13 @@ void MainWindow::onWipeFinished(bool success, const QString &message) {
         QMessageBox::warning(this, "PurgeX", message);
     }
     
+    // Refresh Audit History tab so the new record appears immediately
+    if (auditWidget) auditWidget->refresh();
+    
     // Clear current worker reference
     currentWorker = nullptr;
 }
+
 
 void MainWindow::onWipeWarning(const QString &message) {
     log(QString("[WARNING] %1").arg(message));
@@ -344,6 +354,10 @@ void MainWindow::log(const QString &line) {
         *logStream << full << "\n";
         logStream->flush();
     }
+}
+
+void MainWindow::onRefreshAuditLog() {
+    if (auditWidget) auditWidget->refresh();
 }
 
 void MainWindow::showAbout() {

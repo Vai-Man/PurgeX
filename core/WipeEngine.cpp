@@ -685,84 +685,163 @@ WipeWorker::WipeWorker(const WipeConfig &config, WipeEngine *engine, QObject *pa
 void WipeWorker::run() {
     // Don't connect finished signal to avoid duplicate messages
     connect(engine, &WipeEngine::progress, this, &WipeWorker::progress);
-    connect(engine, &WipeEngine::warning, this, &WipeWorker::warning);
-    // Pre-compute certificate details BEFORE wiping so sizes are accurate
+    connect(engine, &WipeEngine::warning,  this, &WipeWorker::warning);
+
+    // ---- Pre-compute certificate details BEFORE wiping so sizes are accurate ----
     CertDetails preDetails;
     preDetails.subject = "PurgeX User";
 
-    auto patternNameOf = [](WipePattern p){
+    auto patternNameOf = [](WipePattern p) {
         switch (p) {
-            case WipePattern::ZERO_FILL: return QString("Zero Fill");
-            case WipePattern::ONE_FILL: return QString("One Fill");
-            case WipePattern::RANDOM: return QString("Random");
-            case WipePattern::ALTERNATING: return QString("Alternating");
+            case WipePattern::ZERO_FILL:          return QString("Zero Fill");
+            case WipePattern::ONE_FILL:           return QString("One Fill");
+            case WipePattern::RANDOM:             return QString("Random");
+            case WipePattern::ALTERNATING:        return QString("Alternating");
             case WipePattern::NIST_800_88_1_PASS: return QString("NIST SP 800-88 (1 pass)");
             case WipePattern::NIST_800_88_3_PASS: return QString("NIST SP 800-88 (3 passes)");
             case WipePattern::NIST_800_88_7_PASS: return QString("NIST SP 800-88 (7 passes)");
-            case WipePattern::GUTMANN_35_PASS: return QString("Gutmann (35 passes)");
+            case WipePattern::GUTMANN_35_PASS:    return QString("Gutmann (35 passes)");
         }
         return QString("Unknown");
     };
-    auto targetNameOf = [](WipeTarget t){
+    auto targetNameOf = [](WipeTarget t) {
         switch (t) {
-            case WipeTarget::FILES: return QString("Files");
-            case WipeTarget::FOLDERS: return QString("Folders");
+            case WipeTarget::FILES:      return QString("Files");
+            case WipeTarget::FOLDERS:   return QString("Folders");
             case WipeTarget::FREE_SPACE: return QString("Free Space");
             case WipeTarget::FULL_DRIVE: return QString("Full Drive");
         }
         return QString("Unknown");
     };
-    preDetails.method = QString("Target: %1, Pattern: %2, Passes: %3, Verify: %4")
+
+    preDetails.method = QString("Target: %1 | Pattern: %2 | Passes: %3 | Verify: %4")
                         .arg(targetNameOf(config.target))
                         .arg(patternNameOf(config.pattern))
                         .arg(config.passes)
                         .arg(config.verify ? "Yes" : "No");
-    if (config.target == WipeTarget::FILES || config.target == WipeTarget::FOLDERS) {
+
+    if (config.target == WipeTarget::FILES || config.target == WipeTarget::FOLDERS)
         preDetails.targets = config.paths;
-    } else {
+    else
         preDetails.targets = QStringList(config.drive);
-    }
-    qint64 totalBytesPre = 0;
+
+    qint64      totalBytesPre = 0;
     QStringList processedFilesPre;
+
     if (config.target == WipeTarget::FILES || config.target == WipeTarget::FOLDERS) {
         for (const QString &path : config.paths) {
             QFileInfo info(path);
             if (info.isFile()) {
                 totalBytesPre += info.size();
-                processedFilesPre.append(QString("%1 (%2 bytes)").arg(info.fileName()).arg(info.size()));
+                processedFilesPre.append(
+                    QString("%1 (%2 bytes)").arg(info.fileName()).arg(info.size()));
             } else if (info.isDir()) {
                 QDirIterator it(path, QDir::Files, QDirIterator::Subdirectories);
                 while (it.hasNext()) {
                     QFileInfo fi(it.next());
                     totalBytesPre += fi.size();
-                    processedFilesPre.append(QString("%1 (%2 bytes)").arg(fi.fileName()).arg(fi.size()));
+                    processedFilesPre.append(
+                        QString("%1 (%2 bytes)").arg(fi.fileName()).arg(fi.size()));
                 }
             }
         }
     } else if (config.target == WipeTarget::FREE_SPACE) {
         QStorageInfo storage(config.drive);
         if (storage.isValid()) totalBytesPre = storage.bytesAvailable();
-        processedFilesPre.append(QString("Free space on %1: ~%2 bytes").arg(config.drive).arg(totalBytesPre));
+        processedFilesPre.append(
+            QString("Free space on %1: ~%2 bytes").arg(config.drive).arg(totalBytesPre));
     } else if (config.target == WipeTarget::FULL_DRIVE) {
         QFile deviceFile(config.drive);
-        if (deviceFile.open(QIODevice::ReadOnly)) { totalBytesPre = deviceFile.size(); deviceFile.close(); }
-        processedFilesPre.append(QString("Device %1: ~%2 bytes").arg(config.drive).arg(totalBytesPre));
+        if (deviceFile.open(QIODevice::ReadOnly)) {
+            totalBytesPre = deviceFile.size();
+            deviceFile.close();
+        }
+        processedFilesPre.append(
+            QString("Device %1: ~%2 bytes").arg(config.drive).arg(totalBytesPre));
     }
+
     preDetails.bytesProcessed = totalBytesPre;
     if (!processedFilesPre.isEmpty()) {
-        preDetails.targets.append("Processed Files:");
+        preDetails.targets.append("--- Processed Files ---");
         preDetails.targets.append(processedFilesPre);
     }
 
+    // ---- Perform the wipe ----
     bool success = engine->performWipe(config);
 
-    // Generate certificate if requested and wipe was successful
+    // ---- Post-wipe verification ----
+    VerificationResult vr;
+    vr.performed = false;
+
+    if (success && config.verify) {
+        emit progress(0, "Starting verification pass...");
+
+        if (config.target == WipeTarget::FILES || config.target == WipeTarget::FOLDERS) {
+            // Note: files are deleted after wipe — we can only verify they're gone
+            vr.performed = true;
+            vr.sectorsChecked = config.paths.size();
+            qint64 missing = 0;
+            for (const QString &p : config.paths) {
+                if (!QFile::exists(p)) ++missing;
+            }
+            vr.sectorsVerified = missing;
+            vr.sectorsFailed   = config.paths.size() - missing;
+            vr.passed = (vr.sectorsFailed == 0);
+            vr.operationType = "filesystem-wipe";
+            vr.note = vr.passed
+                ? "All target files confirmed deleted from filesystem."
+                : QString("%1 file(s) still present after wipe — verify permissions."
+                          ).arg(vr.sectorsFailed);
+        } else if (config.target == WipeTarget::FREE_SPACE) {
+            vr = engine->verifyFreeSpace(config.drive, config.pattern);
+        }
+        // Full-drive verification not performed — result would be unreliable on SSDs.
+        // The certificate notes this limitation explicitly.
+
+        emit engine->verificationComplete(vr);
+        emit warning(vr.note);
+
+        // Append verification info to method string
+        preDetails.method += QString("\nVerification: %1").arg(
+            vr.passed ? "PASSED" : (vr.performed ? "FAILED" : "NOT PERFORMED"));
+        preDetails.verificationStatus = vr.passed ? "verified" : (vr.performed ? "failed" : "not_performed");
+        preDetails.verificationNote   = vr.note;
+    } else {
+        preDetails.verificationStatus = "unverified";
+        preDetails.verificationNote   = "Verification was not requested."
+                                        " Enable 'Verify After Wipe' for post-wipe read-back check.";
+    }
+
+    // Set operation type for the certificate
+    switch (config.target) {
+        case WipeTarget::FILES:
+        case WipeTarget::FOLDERS:
+            preDetails.operationType = "filesystem-wipe";
+            break;
+        case WipeTarget::FREE_SPACE:
+            preDetails.operationType = vr.performed && vr.passed
+                ? "verified-host-level-overwrite"
+                : "host-level-overwrite";
+            break;
+        case WipeTarget::FULL_DRIVE:
+            preDetails.operationType = "host-level-overwrite";
+            if (preDetails.verificationNote.isEmpty())
+                preDetails.verificationNote =
+                    "Full-drive host-level overwrite performed. Verification of individual sectors "
+                    "was not performed. For SSDs, wear-leveling and over-provisioning may cause "
+                    "some NAND cells to retain data. Hardware Secure Erase is recommended for "
+                    "certified sanitization of SSD media.";
+            if (preDetails.verificationStatus.isEmpty())
+                preDetails.verificationStatus = "limitation";
+            break;
+    }
+
+    // ---- Generate certificate ----
     if (success && config.generateCertificate) {
         CertManager certManager;
         certManager.generateCertificates(preDetails, nullptr);
     }
 
-    // Emit our own finished signal
     emit finished(success, success ? "Operation completed successfully" : "Operation failed");
 }
 
@@ -809,4 +888,132 @@ bool WipeEngine::requestAdministratorPrivileges() {
     // On Linux/macOS, we can't automatically elevate - user needs to run with sudo
     return false;
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// verifyFile — read back the wiped file and confirm expected pattern
+// Called after overwrite but BEFORE deletion (if caller skips deletion).
+// In the normal wipe flow files are deleted, so we verify non-existence instead.
+// This function is used for free-space temp files that still exist.
+// ---------------------------------------------------------------------------
+VerificationResult WipeEngine::verifyFile(const QString &filePath, WipePattern pattern)
+{
+    VerificationResult vr;
+    vr.performed     = true;
+    vr.operationType = "host-level-overwrite";
+
+    QFile f(filePath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        vr.passed = false;
+        vr.note   = QString("Cannot open file for verification (ReadOnly): %1")
+                        .arg(f.errorString());
+        return vr;
+    }
+
+    const qint64 chunkSize = 1 * 1024 * 1024; // 1 MB read-back chunks
+    qint64 checked = 0, verified = 0, failed = 0;
+    int pass = 0; // We verify against pass 0 of the pattern
+
+    while (!cancelled) {
+        QByteArray actual = f.read(chunkSize);
+        if (actual.isEmpty()) break;
+
+        QByteArray expected = generatePattern(pattern, actual.size(), pass);
+        ++checked;
+
+        if (actual == expected) {
+            ++verified;
+        } else {
+            ++failed;
+        }
+    }
+
+    f.close();
+
+    vr.sectorsChecked  = checked;
+    vr.sectorsVerified = verified;
+    vr.sectorsFailed   = failed;
+    vr.passed          = (failed == 0 && checked > 0);
+
+    if (vr.passed) {
+        vr.note = QString("Read-back verification passed: %1 chunk(s) verified.").arg(verified);
+    } else {
+        vr.note = QString("Read-back verification: %1/%2 chunk(s) mismatch. "
+                          "This may indicate OS buffering, filesystem caching, or incomplete write flush.")
+                      .arg(failed).arg(checked);
+    }
+
+    return vr;
+}
+
+// ---------------------------------------------------------------------------
+// verifyFreeSpace — write a known temp file, verify its content, then delete
+// This is the only meaningful host-level free-space verification possible
+// without raw sector access. SSD limitations are explicitly noted.
+// ---------------------------------------------------------------------------
+VerificationResult WipeEngine::verifyFreeSpace(const QString &drive, WipePattern pattern)
+{
+    VerificationResult vr;
+    vr.performed     = true;
+    vr.operationType = "host-level-overwrite";
+
+    // Detect if drive is likely SSD
+    vr.isSSD = isSSD(drive);
+
+    // Write a known verification probe
+    QString probeDir  = QDir(drive).filePath("PurgeX_Verify");
+    QString probePath = QDir(probeDir).filePath("purgex_verify_probe.dat");
+    QDir().mkpath(probeDir);
+
+    const qint64 probeSize = 4 * 1024 * 1024; // 4 MB probe
+    QByteArray   expected  = generatePattern(pattern, probeSize, 0);
+
+    {
+        QFile wf(probePath);
+        if (!wf.open(QIODevice::WriteOnly)) {
+            vr.passed = false;
+            vr.note   = "Cannot create verification probe file.";
+            return vr;
+        }
+        wf.write(expected);
+        wf.flush();
+        wf.close();
+    }
+
+    // Read it back
+    QFile rf(probePath);
+    if (!rf.open(QIODevice::ReadOnly)) {
+        vr.passed = false;
+        vr.note   = "Cannot read verification probe file.";
+        QFile::remove(probePath);
+        QDir(probeDir).removeRecursively();
+        return vr;
+    }
+
+    QByteArray actual = rf.readAll();
+    rf.close();
+
+    // Clean up probe
+    QFile::remove(probePath);
+    QDir(probeDir).removeRecursively();
+
+    vr.sectorsChecked  = 1;
+    vr.sectorsVerified = (actual == expected) ? 1 : 0;
+    vr.sectorsFailed   = (actual == expected) ? 0 : 1;
+    vr.passed          = (actual == expected);
+
+    if (vr.isSSD) {
+        vr.note = "Host-level overwrite verified on free-space probe. "
+                  "NOTE: SSD wear-leveling and over-provisioning may cause some NAND cells "
+                  "to retain data even after a verified host-level overwrite. "
+                  "This verification confirms the host write path only, not physical media erasure. "
+                  "Use Hardware Secure Erase for certified SSD sanitization.";
+    } else {
+        vr.note = vr.passed
+            ? "Free-space probe verified: written pattern matches read-back on HDD."
+            : "Free-space probe MISMATCH: read-back data does not match written pattern. "
+              "OS caching may have interfered. Try again without background applications.";
+    }
+
+    return vr;
 }

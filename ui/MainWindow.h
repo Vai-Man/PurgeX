@@ -28,6 +28,8 @@ class OneClickWidget;
 class AdvancedWidget;
 class DriveWidget;
 class CertificateWidget;
+class ForensicWidget;
+class AuditWidget;
 
 class MainWindow : public QWidget {
     Q_OBJECT
@@ -44,6 +46,7 @@ private slots:
     void onWipeWarning(const QString &message);
     void onCancelWipe();
     void showAbout();
+    void onRefreshAuditLog();
 
 private:
     void setupUI();
@@ -61,6 +64,8 @@ private:
     AdvancedWidget *advancedWidget;
     DriveWidget *driveWidget;
     CertificateWidget *certificateWidget;
+    ForensicWidget *forensicWidget;
+    AuditWidget *auditWidget;
     
     WipeEngine *wipeEngine;
     CertManager *certManager;
