@@ -20,7 +20,7 @@ struct AuditEntry {
     QString   verificationStatus;// "verified" | "unverified" | "not_applicable" | "limitation"
     QString   verificationNote;  // Human-readable caveat (e.g. SSD note)
     QString   certPath;          // Absolute path to generated certificate (may be empty)
-    qint64    bytesProcessed;
+    qint64    bytesProcessed = 0;
     QString   details;           // Free-form extra info
 
     QJsonObject toJson() const;

@@ -1,50 +1,29 @@
 #!/bin/bash
+# Builds PurgeX with qmake. Tested with Qt 5.15 on Windows (MSYS2); the Linux build uses the same sources.
+set -e
 
-echo "Building PurgeX - Secure Data Wiping Tool"
-echo "Building PurgeX"
-echo
-
-# Check if qmake is available
 if ! command -v qmake &> /dev/null; then
-    echo "Error: qmake not found. Please install Qt5 or Qt6."
+    echo "Error: qmake not found. Install Qt 5.15+ (widgets + printsupport) and OpenSSL headers:"
     echo
-    echo "Ubuntu/Debian: sudo apt install qt5-default qtbase5-dev"
-    echo "Fedora/RHEL: sudo dnf install qt5-qtbase-devel"
-    echo "Arch/Manjaro: sudo pacman -S qt5-base qt5-tools"
-    echo "macOS: brew install qt@5"
+    echo "  Ubuntu/Debian: sudo apt install build-essential qtbase5-dev qt5-qmake libssl-dev"
+    echo "  Fedora/RHEL:   sudo dnf install gcc-c++ qt5-qtbase-devel openssl-devel"
+    echo "  Arch/Manjaro:  sudo pacman -S base-devel qt5-base openssl"
     exit 1
 fi
 
-echo "Using qmake:"
-qmake --version
-echo
-
-# Clean previous build
-echo "Cleaning previous build..."
-rm -f Makefile Makefile.Debug Makefile.Release
-rm -rf debug release
+echo "Using $(qmake --version | tail -1)"
 
 echo "Generating Makefile..."
 qmake PurgeX.pro
-if [ $? -ne 0 ]; then
-    echo "Error: qmake failed"
-    exit 1
-fi
 
-echo
 echo "Compiling..."
-make -j$(nproc)
-if [ $? -ne 0 ]; then
-    echo "Error: Compilation failed"
-    exit 1
-fi
+if command -v nproc &> /dev/null; then JOBS=$(nproc); else JOBS=$(sysctl -n hw.ncpu 2>/dev/null || echo 2); fi
+make -j"$JOBS"
 
 echo
-echo "Build completed successfully!"
+echo "Build completed successfully: ./PurgeX"
 echo
-echo "Executable: ./PurgeX"
+echo "  GUI:  ./PurgeX"
+echo "  CLI:  ./PurgeX --help"
 echo
-echo "Usage:"
-echo "  GUI Mode: ./PurgeX"
-echo "  CLI Mode: ./PurgeX --cli --help"
-echo
+echo "Raw disk access (full-drive wipe, hardware secure erase, device recovery) needs root: run with sudo."

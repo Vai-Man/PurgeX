@@ -157,3 +157,5 @@ random/
 # Generated qmake files
 .qmake.stash
 object_script.*
+# Keep the CMake project file (*.txt is ignored above)
+!CMakeLists.txt

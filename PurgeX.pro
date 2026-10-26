@@ -2,6 +2,7 @@ QT       += core gui widgets printsupport
 
 TEMPLATE = app
 TARGET = PurgeX
+CONFIG   += c++17
 
 SOURCES += \
     main.cpp \
@@ -18,6 +19,7 @@ SOURCES += \
 HEADERS += \
     core/WipeEngine.h \
     core/AuditLog.h \
+    core/AppPaths.h \
     ui/MainWindow.h \
     ui/ForensicWidget.h \
     ui/AuditWidget.h \
@@ -31,12 +33,14 @@ RESOURCES += resources.qrc
 
 INCLUDEPATH += core ui cli cert forensics
 
-# Windows specific
+# OpenSSL (libcrypto): RSA key generation, certificate signing and verification.
+# Ubuntu/Debian: libssl-dev   Fedora: openssl-devel   MSYS2: mingw-w64-ucrt-x86_64-openssl
+LIBS += -lcrypto
+
 win32 {
-    LIBS += -lsetupapi
+    LIBS += -lws2_32 -lcrypt32
 }
 
-# Linux specific
 unix:!macx {
     LIBS += -lrt
 }

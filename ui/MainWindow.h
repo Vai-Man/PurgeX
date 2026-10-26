@@ -6,6 +6,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
+#include <QLineEdit>
 #include <QLabel>
 #include <QProgressBar>
 #include <QTextEdit>
@@ -55,6 +56,8 @@ private:
     void updateDriveList();
     void log(const QString &line);
     void showSettings();
+    void startWorker(const WipeConfig &config, const QString &label);
+    bool confirmWipe(const WipeConfig &config);
     void applyLightTheme();
     void toggleDarkTheme(bool enabled);
     void togglePitchBlackTheme(bool enabled);
@@ -75,13 +78,13 @@ private:
     QPushButton *cancelButton;
     QTextEdit *logText;
     
-    QTimer *driveUpdateTimer;
-    WipeWorker *currentWorker;
-    QFile *logFile;
-    QTextStream *logStream;
+    QTimer *driveUpdateTimer = nullptr;
+    WipeWorker *currentWorker = nullptr;
+    QFile *logFile = nullptr;
+    QTextStream *logStream = nullptr;
     QString logsDirPath;
-    bool isDarkTheme;
-    bool isPitchBlackTheme;
+    bool isDarkTheme = false;
+    bool isPitchBlackTheme = false;
 };
 
 class OneClickWidget : public QWidget {
@@ -108,7 +111,7 @@ private:
     
     QString selectedTarget; // For single folder selection
     QStringList selectedTargets; // For multiple file selection
-    WipeTarget targetType;
+    WipeTarget targetType = WipeTarget::FILES;
 };
 
 class AdvancedWidget : public QWidget {
@@ -166,6 +169,7 @@ private slots:
 
 private:
     void setupUI();
+    void refreshButtons();
     
     QListWidget *driveList;
     QComboBox *patternCombo;
@@ -190,6 +194,7 @@ private slots:
     void onVerifyCertificate();
     void onOpenCertificateFolder();
     void onOpenLogsFolder();
+    void onVerifyQr();
 
 private:
     void setupUI();
@@ -197,6 +202,8 @@ private:
     QPushButton *verifyButton;
     QPushButton *openFolderButton;
     QPushButton *openLogsFolderButton;
+    QLineEdit *qrEdit;
+    QPushButton *verifyQrButton;
     QTextEdit *resultText;
 };
 

@@ -2,7 +2,7 @@ QT       += core testlib gui widgets printsupport
 
 TEMPLATE = app
 TARGET = PurgeXTests
-CONFIG  += console
+CONFIG  += console c++17
 CONFIG  -= app_bundle
 
 SOURCES += \
@@ -14,8 +14,13 @@ SOURCES += \
     ../forensics/ForensicEngine.cpp
 
 HEADERS += \
+    test_wipe_verify.h \
+    test_wipe_engine.h \
+    test_forensic_engine.h \
+    test_cert_manager.h \
     ../core/WipeEngine.h \
     ../core/AuditLog.h \
+    ../core/AppPaths.h \
     ../cert/CertManager.h \
     ../cert/qrcodegen.hpp \
     ../forensics/ForensicEngine.h \
@@ -23,8 +28,10 @@ HEADERS += \
 
 INCLUDEPATH += .. ../core ../cert ../forensics
 
+LIBS += -lcrypto
+
 win32 {
-    LIBS += -lsetupapi
+    LIBS += -lws2_32 -lcrypt32
 }
 unix:!macx {
     LIBS += -lrt

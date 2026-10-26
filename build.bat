@@ -1,93 +1,80 @@
 @echo off
+setlocal
 echo =========================================
-echo  Building PurgeX - Secure Data Wiping Tool
+echo  Building PurgeX
 echo =========================================
 echo.
 
-REM Set the path to include Qt binaries (MSYS2)
-set "PATH=C:\msys64\ucrt64\bin;%PATH%"
+REM Default toolchain location (MSYS2 UCRT64). If qmake is already on PATH it is used as is.
+if exist "C:\msys64\ucrt64\bin\qmake.exe" set "PATH=C:\msys64\ucrt64\bin;%PATH%"
 
-REM Check if qmake is available
 where qmake >nul 2>nul
-if %errorlevel% neq 0 (
-    echo Error: qmake not found. Please install Qt5 or Qt6.
+if errorlevel 1 (
+    echo Error: qmake not found.
     echo.
-    echo Windows: Download from https://www.qt.io/download
-    echo Or use MSYS2: pacman -S mingw-w64-x86_64-qt5
-    pause
+    echo Install the toolchain with MSYS2 ^(UCRT64 shell^):
+    echo   pacman -S mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-qt5-base ^
+    echo             mingw-w64-ucrt-x86_64-qt5-tools mingw-w64-ucrt-x86_64-openssl
+    echo or use the Qt online installer and run this script from a Qt MinGW prompt.
+    if not defined CI pause
     exit /b 1
 )
 
-echo Using qmake:
+for /f "delims=" %%i in ('where qmake') do (
+    set "TOOL_BIN=%%~dpi"
+    goto :found
+)
+:found
+echo Using qmake from %TOOL_BIN%
 qmake -v
-
 echo.
+
 echo Generating Makefile...
 qmake PurgeX.pro
+if errorlevel 1 (
+    echo qmake failed.
+    if not defined CI pause
+    exit /b 1
+)
 
 echo.
 echo Compiling...
-mingw32-make -f Makefile.Release
-
-if %errorlevel% neq 0 (
+mingw32-make -f Makefile.Release -j %NUMBER_OF_PROCESSORS%
+if errorlevel 1 (
     echo.
     echo Build failed!
-    pause
+    if not defined CI pause
     exit /b 1
 )
 
 echo.
 echo =========================================
-echo  Deploying Dependencies
+echo  Deploying dependencies
 echo =========================================
 echo.
-cd /d "%~dp0\release"
+cd /d "%~dp0release"
 
 windeployqt.exe --compiler-runtime PurgeX.exe
-
-if %ERRORLEVEL% NEQ 0 (
+if errorlevel 1 (
     echo.
-    echo windeployqt failed. Proceeding with manual MSYS2 fallback deployment...
-    set MINGW_BIN=C:\msys64\ucrt64\bin
-    set PLUGINS_DIR=C:\msys64\ucrt64\share\qt5\plugins
-    
-    copy /y "%MINGW_BIN%\Qt5Core.dll" . >nul
-    copy /y "%MINGW_BIN%\Qt5Gui.dll" . >nul
-    copy /y "%MINGW_BIN%\Qt5Widgets.dll" . >nul
-    copy /y "%MINGW_BIN%\Qt5PrintSupport.dll" . >nul
-    copy /y "%MINGW_BIN%\libgcc_s_seh-1.dll" . >nul
-    copy /y "%MINGW_BIN%\libstdc++-6.dll" . >nul
-    copy /y "%MINGW_BIN%\libwinpthread-1.dll" . >nul
-    
-    REM Transitive dependencies
-    copy /y "%MINGW_BIN%\libdouble-conversion.dll" . >nul
-    copy /y "%MINGW_BIN%\libfreetype-6.dll" . >nul
-    copy /y "%MINGW_BIN%\libicuin77.dll" . >nul
-    copy /y "%MINGW_BIN%\libicuuc77.dll" . >nul
-    copy /y "%MINGW_BIN%\libicudt77.dll" . >nul
-    copy /y "%MINGW_BIN%\libpcre2-16-0.dll" . >nul
-    copy /y "%MINGW_BIN%\libpcre2-8-0.dll" . >nul
-    copy /y "%MINGW_BIN%\zlib1.dll" . >nul
-    copy /y "%MINGW_BIN%\libzstd.dll" . >nul
-    copy /y "%MINGW_BIN%\libharfbuzz-0.dll" . >nul
-    copy /y "%MINGW_BIN%\libmd4c.dll" . >nul
-    copy /y "%MINGW_BIN%\libpng16-16.dll" . >nul
-    copy /y "%MINGW_BIN%\libbrotlidec.dll" . >nul
-    copy /y "%MINGW_BIN%\libbrotlicommon.dll" . >nul
-    copy /y "%MINGW_BIN%\libbz2-1.dll" . >nul
-    copy /y "%MINGW_BIN%\libglib-2.0-0.dll" . >nul
-    copy /y "%MINGW_BIN%\libgraphite2.dll" . >nul
-    copy /y "%MINGW_BIN%\libintl-8.dll" . >nul
-    copy /y "%MINGW_BIN%\libiconv-2.dll" . >nul
-
+    echo windeployqt failed. Copying the MSYS2 runtime manually...
+    for %%D in (Qt5Core Qt5Gui Qt5Widgets Qt5PrintSupport libgcc_s_seh-1 libstdc++-6 libwinpthread-1 ^
+                libdouble-conversion libfreetype-6 libicuin77 libicuuc77 libicudt77 libpcre2-16-0 libpcre2-8-0 ^
+                zlib1 libzstd libharfbuzz-0 libmd4c libpng16-16 libbrotlidec libbrotlicommon libbz2-1 ^
+                libglib-2.0-0 libgraphite2 libintl-8 libiconv-2) do (
+        if exist "%TOOL_BIN%%%D.dll" copy /y "%TOOL_BIN%%%D.dll" . >nul
+    )
     if not exist platforms mkdir platforms
-    copy /y "%PLUGINS_DIR%\platforms\qwindows.dll" platforms\ >nul
-
+    copy /y "%TOOL_BIN%..\share\qt5\plugins\platforms\qwindows.dll" platforms\ >nul
     if not exist imageformats mkdir imageformats
-    copy /y "%PLUGINS_DIR%\imageformats\qjpeg.dll" imageformats\ >nul
+    copy /y "%TOOL_BIN%..\share\qt5\plugins\imageformats\qjpeg.dll" imageformats\ >nul
 )
 
+REM libcrypto signs and verifies certificates; windeployqt does not know about it.
+for %%F in ("%TOOL_BIN%libcrypto-*.dll") do copy /y "%%F" . >nul
+
 echo.
-echo Build and deployment completed successfully!
-echo You can find the standalone application in the 'release' folder.
-pause
+echo Build and deployment completed successfully.
+echo The standalone application is in the 'release' folder.
+if not defined CI pause
+endlocal

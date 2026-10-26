@@ -1,10 +1,12 @@
 #include "MainWindow.h"
 #include "ForensicWidget.h"
 #include "AuditWidget.h"
+#include "../core/AppPaths.h"
 #include <QApplication>
 #include <QMenuBar>
 #include <QStatusBar>
 #include <QMessageBox>
+#include <QInputDialog>
 #include <QDialog>
 #include <QGroupBox>
 #include <QCheckBox>
@@ -28,11 +30,6 @@
 MainWindow::MainWindow(QWidget *parent) : QWidget(parent) {
     wipeEngine = new WipeEngine(this);
     certManager = new CertManager(this);
-    logFile = nullptr;
-    logStream = nullptr;
-    logsDirPath.clear();
-    isDarkTheme = false;
-    isPitchBlackTheme = false;
     
     setupUI();
     setupMenuBar();
@@ -47,13 +44,12 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent) {
     updateDriveList();
 
     // Initialize persistent log file with robust fallbacks
-    QStringList baseDirs;
-    baseDirs << QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
-             << QDir::homePath()
-             << QDir::currentPath();
-    for (const QString &base : baseDirs) {
-        if (base.isEmpty()) continue;
-        QDir candidate(QDir(base).filePath("PurgeX/logs"));
+    QStringList logDirs;
+    logDirs << AppPaths::logsDir()
+            << QDir(QDir::homePath()).filePath("PurgeX/logs")
+            << QDir(QDir::currentPath()).filePath("PurgeX/logs");
+    for (const QString &dir : logDirs) {
+        QDir candidate(dir);
         if (!candidate.exists()) candidate.mkpath(".");
         if (candidate.exists()) {
             logsDirPath = candidate.absolutePath();
@@ -82,6 +78,17 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent) {
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
+    if (currentWorker && currentWorker->isRunning()) {
+        const auto answer = QMessageBox::question(this, "Operation in progress",
+            "A wipe is still running. Closing now cancels it and can leave data partially overwritten.\n\n"
+            "Cancel the operation and exit?", QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes) {
+            event->ignore();
+            return;
+        }
+        wipeEngine->cancel();
+        currentWorker->wait(30000);
+    }
     if (driveUpdateTimer) {
         driveUpdateTimer->stop();
     }
@@ -102,7 +109,7 @@ void MainWindow::setupUI() {
     
     // Add menu bar
     auto *menuLayout = new QHBoxLayout();
-    auto *titleLabel = new QLabel("PurgeX - Secure Data Wiping Tool", this);
+    auto *titleLabel = new QLabel("PurgeX - Secure Erasure and Recovery", this);
     titleLabel->setObjectName("mainTitle");
     titleLabel->setStyleSheet("font-size: 16px; font-weight: bold; margin: 5px;");
     menuLayout->addWidget(titleLabel);
@@ -141,95 +148,68 @@ void MainWindow::setupUI() {
     
     // Connect signals
     connect(oneClickWidget, &OneClickWidget::startWipe, this, [this](WipeConfig config) {
-        // Expand folder target to individual files for actual wiping
-        if (config.target == WipeTarget::FOLDERS && !config.paths.isEmpty()) {
-            QString folder = config.paths.first();
-            QStringList expanded;
-            QDirIterator it(folder, QDir::Files, QDirIterator::Subdirectories);
-            while (it.hasNext()) expanded.append(it.next());
-            config.target = WipeTarget::FILES;
-            config.paths = expanded;
-        }
-
-        // Guard: nothing to wipe
-        if ((config.target == WipeTarget::FILES && config.paths.isEmpty()) ||
-            (config.target == WipeTarget::FREE_SPACE && config.drive.isEmpty()) ||
-            (config.target == WipeTarget::FULL_DRIVE && config.drive.isEmpty())) {
-            log("[ERROR] No valid targets provided for One-Click wipe.");
-            QMessageBox::warning(this, "PurgeX", "No valid targets to wipe.");
-            return;
-        }
-
-        // Immediate UI feedback
-        statusProgress->setVisible(true);
-        statusProgress->setValue(0);
-        cancelButton->setVisible(true);
-        statusLabel->setText("Initializing wipe...");
-        // Log initiation
-        log(QString("[INFO] Starting One-Click wipe. Targets: %1")
-            .arg(config.target == WipeTarget::FILES ? QString::number(config.paths.size()) : config.drive));
-
-        currentWorker = new WipeWorker(config, wipeEngine, this);
-        connect(currentWorker, &WipeWorker::progress, this, &MainWindow::onWipeProgress);
-        connect(currentWorker, &WipeWorker::finished, this, &MainWindow::onWipeFinished);
-        connect(currentWorker, &WipeWorker::warning, this, &MainWindow::onWipeWarning);
-        connect(currentWorker, &WipeWorker::finished, currentWorker, &QObject::deleteLater);
-        currentWorker->start();
+        startWorker(config, "One-Click wipe");
     });
-    
-        connect(advancedWidget, &AdvancedWidget::startWipe, this, [this](WipeConfig config) {
-        // Expand folders to file list to ensure actual wiping occurs
-        if (config.target == WipeTarget::FOLDERS || (config.target == WipeTarget::FILES && !config.paths.isEmpty())) {
-            QStringList expanded;
-            for (const QString &path : config.paths) {
-                QFileInfo info(path);
-                if (info.isFile()) {
-                    expanded.append(path);
-                } else if (info.isDir()) {
-                    QDirIterator it(path, QDir::Files, QDirIterator::Subdirectories);
-                    while (it.hasNext()) expanded.append(it.next());
-                }
-            }
-            config.target = WipeTarget::FILES;
-            config.paths = expanded;
-        }
-        
-        // Immediate UI feedback
-        statusProgress->setVisible(true);
-        statusProgress->setValue(0);
-        cancelButton->setVisible(true);
-        statusLabel->setText("Initializing advanced wipe...");
-        
-        // Log initiation  
-        log(QString("[INFO] Starting advanced wipe. Files: %1, Pattern: %2")
-            .arg(config.paths.size()).arg((int)config.pattern));
-        
-        currentWorker = new WipeWorker(config, wipeEngine, this);
-        connect(currentWorker, &WipeWorker::progress, this, &MainWindow::onWipeProgress);
-        connect(currentWorker, &WipeWorker::finished, this, &MainWindow::onWipeFinished);
-        connect(currentWorker, &WipeWorker::warning, this, &MainWindow::onWipeWarning);
-        connect(currentWorker, &WipeWorker::finished, currentWorker, &QObject::deleteLater);
-        currentWorker->start();
+    connect(advancedWidget, &AdvancedWidget::startWipe, this, [this](WipeConfig config) {
+        startWorker(config, "Advanced wipe");
     });
-    
     connect(driveWidget, &DriveWidget::startWipe, this, [this](const WipeConfig &config) {
-        // Immediate UI feedback
-        statusProgress->setVisible(true);
-        statusProgress->setValue(0);
-        cancelButton->setVisible(true);
-        statusLabel->setText("Initializing wipe...");
-        
-        // Log initiation
-        log(QString("[INFO] Starting drive wipe. Target: %1, Pattern: %2")
-            .arg(config.drive).arg((int)config.pattern));
-
-        currentWorker = new WipeWorker(config, wipeEngine, this);
-        connect(currentWorker, &WipeWorker::progress, this, &MainWindow::onWipeProgress);
-        connect(currentWorker, &WipeWorker::finished, this, &MainWindow::onWipeFinished);
-        connect(currentWorker, &WipeWorker::warning, this, &MainWindow::onWipeWarning);
-        connect(currentWorker, &WipeWorker::finished, currentWorker, &QObject::deleteLater);
-        currentWorker->start();
+        startWorker(config, "Drive operation");
     });
+    connect(forensicWidget, &ForensicWidget::recoveryComplete, this, [this]() {
+        if (auditWidget) auditWidget->refresh();
+    });
+}
+
+bool MainWindow::confirmWipe(const WipeConfig &config) {
+    QString what;
+    switch (config.target) {
+        case WipeTarget::FILES:
+        case WipeTarget::FOLDERS:
+            what = QString("%1 selected item(s) will be overwritten with %2 and then deleted.")
+                       .arg(config.paths.size()).arg(WipeEngine::patternName(config.pattern));
+            break;
+        case WipeTarget::FREE_SPACE:
+            what = QString("The free space on %1 will be overwritten with %2. Existing files are not touched, "
+                           "but the drive will be nearly full for the duration.")
+                       .arg(config.drive).arg(WipeEngine::patternName(config.pattern));
+            break;
+        default:
+            return true; // drive-level operations are confirmed in the Drive tab
+    }
+    return QMessageBox::warning(this, "Confirm secure wipe",
+               what + "\n\nThis cannot be undone. Continue?",
+               QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+}
+
+void MainWindow::startWorker(const WipeConfig &config, const QString &label) {
+    if (currentWorker) {
+        QMessageBox::information(this, "PurgeX", "Another operation is still running. Please wait for it to finish.");
+        return;
+    }
+    if ((config.target == WipeTarget::FILES || config.target == WipeTarget::FOLDERS) && config.paths.isEmpty()) {
+        QMessageBox::warning(this, "PurgeX", "No valid targets to wipe.");
+        return;
+    }
+    if (!confirmWipe(config)) return;
+
+    statusProgress->setVisible(true);
+    statusProgress->setValue(0);
+    cancelButton->setVisible(true);
+    cancelButton->setEnabled(true);
+    cancelButton->setText("Cancel");
+    statusLabel->setText("Initializing...");
+    log(QString("[INFO] Starting %1 (%2, %3 target(s))")
+            .arg(label, WipeEngine::patternName(config.pattern))
+            .arg(config.paths.isEmpty() ? 1 : config.paths.size()));
+
+    currentWorker = new WipeWorker(config, wipeEngine, this);
+    connect(currentWorker, &WipeWorker::progress, this, &MainWindow::onWipeProgress);
+    connect(currentWorker, &WipeWorker::finished, this, &MainWindow::onWipeFinished);
+    connect(currentWorker, &WipeWorker::warning, this, &MainWindow::onWipeWarning);
+    // Delete only once the thread has really stopped (QThread::finished, not our result signal).
+    connect(currentWorker, &QThread::finished, currentWorker, &QObject::deleteLater);
+    currentWorker->start();
 }
 
 void MainWindow::setupMenuBar() {
@@ -267,7 +247,8 @@ void MainWindow::setupStatusBar() {
 }
 
 void MainWindow::updateDriveList() {
-    if (driveWidget) {
+    // Probing drives while a wipe holds them open only adds contention.
+    if (driveWidget && !currentWorker) {
         driveWidget->updateDriveList();
     }
 }
@@ -307,43 +288,27 @@ void MainWindow::onWipeFinished(bool success, const QString &message) {
     // Refresh Audit History tab so the new record appears immediately
     if (auditWidget) auditWidget->refresh();
     
-    // Clear current worker reference
     currentWorker = nullptr;
+    cancelButton->setEnabled(true);
+    cancelButton->setText("Cancel");
+    updateDriveList(); // free space has changed
 }
 
 
 void MainWindow::onWipeWarning(const QString &message) {
+    // Warnings can arrive once per file; log them instead of blocking the UI with a dialog each time.
     log(QString("[WARNING] %1").arg(message));
-    QMessageBox::warning(this, "PurgeX Warning", message);
 }
 
 void MainWindow::onCancelWipe() {
-    if (currentWorker) {
-        log("[INFO] Cancelling wipe operation...");
-        wipeEngine->cancel();
-        
-        // Disable cancel button to prevent multiple clicks
-        cancelButton->setEnabled(false);
-        cancelButton->setText("Cancelling...");
-        
-        currentWorker->quit();
-        currentWorker->wait(5000); // Wait up to 5 seconds for graceful shutdown
-        
-        if (currentWorker->isRunning()) {
-            // Force terminate if still running
-            currentWorker->terminate();
-            currentWorker->wait(1000);
-        }
-        
-        currentWorker->deleteLater();
-        currentWorker = nullptr;
-        
-        statusProgress->setVisible(false);
-        cancelButton->setVisible(false);
-        cancelButton->setEnabled(true);
-        cancelButton->setText("Cancel");
-        statusLabel->setText("Operation cancelled");
-    }
+    if (!currentWorker) return;
+    log("[INFO] Cancelling wipe operation...");
+    // Never terminate the thread: that would leave the engine locked and files half-written.
+    // The engine checks the flag between chunks and the worker reports back via onWipeFinished.
+    wipeEngine->cancel();
+    cancelButton->setEnabled(false);
+    cancelButton->setText("Cancelling...");
+    statusLabel->setText("Cancelling...");
 }
 
 void MainWindow::log(const QString &line) {
@@ -362,16 +327,15 @@ void MainWindow::onRefreshAuditLog() {
 
 void MainWindow::showAbout() {
     QMessageBox::about(this, "About PurgeX",
-        "PurgeX — Secure Data Wiping Tool\n\n"
-        "Built by PurgeX\n\n"
-        "Compliant with NIST SP 800-88 standards\n"
-        "Cross-platform support for Windows, Linux, and Android\n\n"
+        "PurgeX - secure data erasure and file recovery\n\n"
+        "Version 1.0.0\n"
+        "Wiping aligned with NIST SP 800-88 Rev. 1 (Clear / Purge)\n\n"
         "Features:\n"
-        "• Secure file and folder wiping\n"
-        "• Drive wiping and free space cleaning\n"
-        "• SSD secure erase support\n"
-        "• Digital wipe certificates\n"
-        "• Multiple overwrite patterns");
+        "• Secure file, folder, free-space and full-disk wiping\n"
+        "• Hardware secure erase (Linux, ATA / NVMe)\n"
+        "• Read-only file recovery with signature carving\n"
+        "• Signed PDF + JSON certificates with QR verification\n"
+        "• Persistent audit history");
 }
 
 void MainWindow::showSettings() {
@@ -762,7 +726,7 @@ void AdvancedWidget::setupUI() {
     patternCombo->addItem("NIST 800-88 (3 passes)", static_cast<int>(WipePattern::NIST_800_88_3_PASS));
     patternCombo->addItem("NIST 800-88 (7 passes)", static_cast<int>(WipePattern::NIST_800_88_7_PASS));
     patternCombo->addItem("Gutmann (35 passes)", static_cast<int>(WipePattern::GUTMANN_35_PASS));
-    patternCombo->setCurrentIndex(4); // Default to NIST 3 passes
+    patternCombo->setCurrentIndex(5); // Default to NIST 3 passes
     settingsLayout->addWidget(patternCombo, 0, 1);
     
     settingsLayout->addWidget(new QLabel("Passes:"), 1, 0);
@@ -993,149 +957,195 @@ void DriveWidget::setupUI() {
 }
 
 void DriveWidget::updateDriveList() {
-    driveList->clear();
-    drives.clear();
-    
     if (!wipeEngine) return;
-    
-    drives = wipeEngine->detectDrives();
-    
-    for (const DriveInfo &drive : drives) {
-        QString itemText = QString("%1 (%2) - %3 free of %4")
-                          .arg(drive.mountPoint)
-                          .arg(drive.fileSystem)
-                          .arg(QString::number(drive.freeSize / (1024*1024*1024)) + " GB")
-                          .arg(QString::number(drive.totalSize / (1024*1024*1024)) + " GB");
-        
+
+    const QList<DriveInfo> fresh = wipeEngine->detectDrives();
+
+    // The list is refreshed on a timer; rebuild only when something changed so the
+    // user's selection is not wiped out from under them every few seconds.
+    bool same = (fresh.size() == drives.size());
+    for (int i = 0; same && i < fresh.size(); ++i)
+        same = fresh[i].mountPoint == drives[i].mountPoint
+            && fresh[i].freeSize / (1024 * 1024) == drives[i].freeSize / (1024 * 1024)
+            && fresh[i].totalSize == drives[i].totalSize;
+    if (same && driveList->count() == fresh.size()) return;
+
+    const QString previous = selectedDrive.mountPoint;
+    driveList->blockSignals(true);
+    driveList->clear();
+    drives = fresh;
+
+    int reselect = -1;
+    for (int i = 0; i < drives.size(); ++i) {
+        const DriveInfo &drive = drives[i];
+        QString itemText = QString("%1 (%2) - %3 GB free of %4 GB")
+                          .arg(drive.mountPoint, drive.fileSystem)
+                          .arg(drive.freeSize / (1024 * 1024 * 1024))
+                          .arg(drive.totalSize / (1024 * 1024 * 1024));
         if (drive.isSSD) itemText += " [SSD]";
         if (drive.supportsSecureErase) itemText += " [Secure Erase]";
-        
         driveList->addItem(itemText);
+        if (drive.mountPoint == previous) reselect = i;
     }
+    if (reselect >= 0) driveList->setCurrentRow(reselect);
+    driveList->blockSignals(false);
+
+    if (reselect >= 0) {
+        selectedDrive = drives[reselect];
+    } else {
+        selectedDrive = DriveInfo();
+        driveInfoLabel->setText("Select a drive to view details");
+    }
+    refreshButtons();
 }
 
 void DriveWidget::onRefreshDrives() {
+    drives.clear();          // force a rebuild
     updateDriveList();
 }
 
-void DriveWidget::onDriveSelected() {
-    int row = driveList->currentRow();
-    if (row >= 0 && row < drives.size()) {
-        selectedDrive = drives[row];
-        
-        QString info = QString("Drive: %1\n"
-                              "File System: %2\n"
-                              "Total Size: %3 GB\n"
-                              "Free Space: %4 GB\n"
-                              "Type: %5\n"
-                              "Secure Erase: %6")
-                      .arg(selectedDrive.mountPoint)
-                      .arg(selectedDrive.fileSystem)
-                      .arg(selectedDrive.totalSize / (1024*1024*1024))
-                      .arg(selectedDrive.freeSize / (1024*1024*1024))
-                      .arg(selectedDrive.isSSD ? "SSD" : "HDD")
-                      .arg(selectedDrive.supportsSecureErase ? "Supported" : "Not Supported");
-        
-        driveInfoLabel->setText(info);
-        
-        // Enable/disable buttons based on drive type
-        if (selectedDrive.isSSD) {
-            // For SSD: Only enable secure erase, disable overwriting methods
-            wipeFreeSpaceButton->setEnabled(false);
-            wipeFullDriveButton->setEnabled(false);
-            secureEraseButton->setEnabled(selectedDrive.supportsSecureErase);
-            
-            // Update button text to explain why disabled
-            wipeFreeSpaceButton->setToolTip("Not recommended for SSDs - use SSD Secure Erase instead");
-            wipeFullDriveButton->setToolTip("Not recommended for SSDs - use SSD Secure Erase instead");
-            secureEraseButton->setToolTip("Hardware-level secure erase for SSDs");
-        } else {
-            // For HDD: Enable overwriting methods, disable secure erase
-            wipeFreeSpaceButton->setEnabled(true);
-            wipeFullDriveButton->setEnabled(true);
-            secureEraseButton->setEnabled(false);
-            
-            // Update tooltips
-            wipeFreeSpaceButton->setToolTip("Overwrite free space with secure patterns");
-            wipeFullDriveButton->setToolTip("Overwrite entire drive with secure patterns");
-            secureEraseButton->setToolTip("Not available for traditional hard drives");
-        }
+void DriveWidget::refreshButtons() {
+    const bool have = !selectedDrive.mountPoint.isEmpty();
+    wipeFreeSpaceButton->setEnabled(have);
+    wipeFullDriveButton->setEnabled(have && !selectedDrive.physicalDevice.isEmpty());
+    secureEraseButton->setEnabled(have && selectedDrive.supportsSecureErase);
+
+    if (selectedDrive.isSSD) {
+        wipeFreeSpaceButton->setToolTip("Overwrites free space at the host level. On SSDs, wear-leveling and "
+                                        "TRIM mean this cannot reach every NAND cell - prefer Secure Erase.");
+        wipeFullDriveButton->setToolTip("Overwrites the whole disk at the host level. On SSDs, hardware Secure "
+                                        "Erase is the certified method.");
+    } else {
+        wipeFreeSpaceButton->setToolTip("Overwrite free space with secure patterns");
+        wipeFullDriveButton->setToolTip("Overwrite the entire physical disk with secure patterns");
     }
+    secureEraseButton->setToolTip(selectedDrive.supportsSecureErase
+        ? "Hardware-level secure erase (ATA Security Erase / NVMe format)"
+        : "Not available: unsupported by the drive, frozen, or PurgeX lacks root privileges (Linux only)");
+}
+
+void DriveWidget::onDriveSelected() {
+    const int row = driveList->currentRow();
+    if (row < 0 || row >= drives.size()) return;
+    selectedDrive = drives[row];
+
+    const QString info = QString("Drive: %1\n"
+                                 "Physical disk: %2\n"
+                                 "Model: %3   Serial: %4\n"
+                                 "File System: %5\n"
+                                 "Total Size: %6 GB   Free Space: %7 GB\n"
+                                 "Type: %8\n"
+                                 "Secure Erase: %9")
+                         .arg(selectedDrive.mountPoint,
+                              selectedDrive.physicalDevice.isEmpty() ? "unknown" : selectedDrive.physicalDevice,
+                              selectedDrive.model, selectedDrive.serial, selectedDrive.fileSystem)
+                         .arg(selectedDrive.totalSize / (1024 * 1024 * 1024))
+                         .arg(selectedDrive.freeSize / (1024 * 1024 * 1024))
+                         .arg(selectedDrive.isSSD ? "SSD / flash" : "HDD",
+                              selectedDrive.supportsSecureErase ? "Supported" : "Not available");
+    driveInfoLabel->setText(info);
+    refreshButtons();
 }
 
 void DriveWidget::onWipeFreeSpace() {
     if (selectedDrive.mountPoint.isEmpty()) return;
-    
+
     WipeConfig config;
     config.target = WipeTarget::FREE_SPACE;
     config.pattern = static_cast<WipePattern>(patternCombo->currentData().toInt());
+    config.passes = 1;
+    config.verify = true;
     config.drive = selectedDrive.mountPoint;
     config.generateCertificate = true;
-    
+
     emit startWipe(config);
 }
 
 void DriveWidget::onWipeFullDrive() {
-    if (selectedDrive.mountPoint.isEmpty()) return;
-    
+    if (selectedDrive.mountPoint.isEmpty() || selectedDrive.physicalDevice.isEmpty()) return;
+
+    if (WipeEngine::isSystemDevice(selectedDrive.device)) {
+        QMessageBox::critical(this, "PurgeX",
+            QString("%1 is on the disk that runs this operating system (%2).\n\n"
+                    "PurgeX will not wipe it. Boot from separate media to erase a system disk.")
+                .arg(selectedDrive.mountPoint, selectedDrive.physicalDevice));
+        return;
+    }
+
     // Check if running as administrator for physical drive access
     if (!WipeEngine::isRunningAsAdministrator()) {
-        int ret = QMessageBox::question(this, "Administrator Required", 
+        int ret = QMessageBox::question(this, "Administrator Required",
             "Physical drive wiping requires Administrator privileges for low-level disk access.\n\n"
-            "Would you like to restart PurgeX as Administrator?\n\n"
-            "Click 'Yes' to restart with elevated privileges, or 'No' to cancel.",
+            "Would you like to restart PurgeX as Administrator?",
             QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
-        
+
         if (ret == QMessageBox::Yes) {
             if (WipeEngine::requestAdministratorPrivileges()) {
-                // Successfully requested elevation, the app will restart
                 QApplication::quit();
             } else {
-                QMessageBox::warning(this, "PurgeX", 
+                QMessageBox::warning(this, "PurgeX",
                     "Failed to request Administrator privileges.\n\n"
-                    "Please manually run PurgeX as Administrator:\n"
-                    "1. Close PurgeX\n"
-                    "2. Right-click on PurgeX.exe\n"
-                    "3. Select 'Run as administrator'");
+                    "Please run PurgeX as Administrator (right-click -> Run as administrator) or use sudo.");
             }
         }
         return;
     }
-    
-    int ret = QMessageBox::warning(this, "PurgeX", 
-        "WARNING: This will permanently destroy ALL data on the selected drive!\n\n"
-        "This operation will perform low-level physical drive wiping.\n"
-        "This action cannot be undone. Are you absolutely sure?",
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    
-    if (ret == QMessageBox::Yes) {
-        WipeConfig config;
-        config.target = WipeTarget::FULL_DRIVE;
-        config.pattern = static_cast<WipePattern>(patternCombo->currentData().toInt());
-        config.drive = selectedDrive.device;
-        config.generateCertificate = true;
-        
-        emit startWipe(config);
+
+    QString text = QString("You are about to PERMANENTLY DESTROY ALL DATA on the entire disk:\n\n"
+                           "    %1  (%2)\n"
+                           "    Model: %3   Serial: %4\n"
+                           "    Selected volume: %5\n\n"
+                           "Every partition on this disk will be erased, not just %5.")
+                       .arg(selectedDrive.physicalDevice,
+                            QString("%1 GB").arg(selectedDrive.totalSize / (1024 * 1024 * 1024)),
+                            selectedDrive.model, selectedDrive.serial, selectedDrive.mountPoint);
+    if (selectedDrive.isSSD)
+        text += "\n\nThis is an SSD: host-level overwriting cannot guarantee that every NAND cell is erased. "
+                "Use Secure Erase for certified sanitization.";
+    text += "\n\nThis cannot be undone. Continue?";
+
+    if (QMessageBox::warning(this, "Confirm full-disk wipe", text,
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return;
+
+    // Second, deliberate confirmation: type the disk name.
+    bool ok = false;
+    const QString expected = QFileInfo(selectedDrive.physicalDevice).fileName();
+    const QString typed = QInputDialog::getText(this, "Final confirmation",
+        QString("Type  %1  to confirm:").arg(expected), QLineEdit::Normal, QString(), &ok);
+    if (!ok || typed.trimmed().compare(expected, Qt::CaseInsensitive) != 0) {
+        QMessageBox::information(this, "PurgeX", "Confirmation did not match. Nothing was changed.");
+        return;
     }
+
+    WipeConfig config;
+    config.target = WipeTarget::FULL_DRIVE;
+    config.pattern = static_cast<WipePattern>(patternCombo->currentData().toInt());
+    config.passes = 1;
+    config.drive = selectedDrive.device;
+    config.generateCertificate = true;
+
+    emit startWipe(config);
 }
 
 void DriveWidget::onSecureEraseSSD() {
-    if (selectedDrive.device.isEmpty() || !selectedDrive.supportsSecureErase) return;
-    
-    int ret = QMessageBox::warning(this, "PurgeX", 
-        "WARNING: SSD Secure Erase will permanently destroy ALL data!\n\n"
-        "This uses the drive's built-in secure erase command and cannot be undone.",
+    if (selectedDrive.physicalDevice.isEmpty() || !selectedDrive.supportsSecureErase) return;
+
+    const int ret = QMessageBox::warning(this, "PurgeX",
+        QString("WARNING: hardware secure erase will permanently destroy ALL data on %1\n"
+                "(%2, serial %3).\n\n"
+                "The drive firmware performs the erase; it cannot be interrupted once started.\n"
+                "This cannot be undone. Continue?")
+            .arg(selectedDrive.physicalDevice, selectedDrive.model, selectedDrive.serial),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    
-    if (ret == QMessageBox::Yes) {
-        WipeConfig config;
-        config.target = WipeTarget::FULL_DRIVE;
-        config.pattern = WipePattern::RANDOM; // Not used for secure erase
-        config.drive = selectedDrive.device;
-        config.generateCertificate = true;
-        
-        emit startWipe(config);
-    }
+    if (ret != QMessageBox::Yes) return;
+
+    WipeConfig config;
+    config.target = WipeTarget::SECURE_ERASE;
+    config.drive = selectedDrive.physicalDevice;
+    config.generateCertificate = true;
+
+    emit startWipe(config);
 }
 
 // CertificateWidget Implementation
@@ -1170,6 +1180,15 @@ void CertificateWidget::setupUI() {
     
     layout->addLayout(buttonLayout);
     
+    auto *qrRow = new QHBoxLayout();
+    qrEdit = new QLineEdit(this);
+    qrEdit->setPlaceholderText("Paste the text of a scanned certificate QR code (<hash>_PurgeX)...");
+    verifyQrButton = new QPushButton("Verify Scanned QR", this);
+    qrRow->addWidget(qrEdit);
+    qrRow->addWidget(verifyQrButton);
+    layout->addLayout(qrRow);
+    connect(verifyQrButton, &QPushButton::clicked, this, &CertificateWidget::onVerifyQr);
+
     resultText = new QTextEdit(this);
     resultText->setPlaceholderText("Certificate verification results will appear here...");
     resultText->setReadOnly(true);
@@ -1191,56 +1210,55 @@ void CertificateWidget::setupUI() {
 }
 
 void CertificateWidget::onVerifyCertificate() {
-    QString fileName = QFileDialog::getOpenFileName(this, "Select Certificate to Verify", 
-                                                   QDir::homePath(), "JSON Files (*.json)");
+    const QString fileName = QFileDialog::getOpenFileName(this, "Select Certificate to Verify",
+                                                          AppPaths::certificatesDir(), "JSON Files (*.json)");
     if (fileName.isEmpty()) return;
-    
+
     CertManager certManager;
     QString message;
-    bool isValid = certManager.verifyJsonCertificate(fileName, &message, this);
+    const bool isValid = certManager.verifyJsonCertificate(fileName, &message, this);
 
-    // Read embedded certificate timestamp from JSON for display
     QString certTimestamp;
     QFile f(fileName);
     if (f.open(QIODevice::ReadOnly)) {
-        QJsonParseError pe{}; QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &pe);
-        if (pe.error == QJsonParseError::NoError && doc.isObject()) {
+        QJsonParseError pe{};
+        const QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &pe);
+        if (pe.error == QJsonParseError::NoError && doc.isObject())
             certTimestamp = doc.object().value("timestamp").toString();
-        }
-        f.close();
     }
     if (certTimestamp.isEmpty()) certTimestamp = "Unknown";
-    // Also show where logs are being written
-    QString documentsPath = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-    if (documentsPath.isEmpty()) documentsPath = QDir::homePath();
-    QString logsPath = QDir(documentsPath).filePath("PurgeX/logs");
-    resultText->append(QString("\nLogs Folder: %1").arg(logsPath));
 
-    QString result = QString("Certificate Verification Result:\n\n"
-                           "File: %1\n"
-                           "Status: %2\n"
-                           "Message: %3\n\n"
-                           "Timestamp: %4")
-                    .arg(QFileInfo(fileName).fileName())
-                    .arg(isValid ? "AUTHENTIC" : "TAMPERED")
-                    .arg(message)
-                    .arg(certTimestamp);
+    resultText->setText(QString("Certificate Verification Result\n\n"
+                                "File: %1\n"
+                                "Status: %2\n"
+                                "Issued: %3\n\n"
+                                "%4")
+                            .arg(QFileInfo(fileName).fileName(),
+                                 isValid ? "AUTHENTIC" : "NOT AUTHENTIC",
+                                 certTimestamp, message));
+}
 
-    resultText->setText(result);
+void CertificateWidget::onVerifyQr() {
+    const QString payload = qrEdit->text().trimmed();
+    if (payload.isEmpty()) {
+        QMessageBox::information(this, "PurgeX", "Paste the scanned QR text first.");
+        return;
+    }
+    const QString fileName = QFileDialog::getOpenFileName(this, "Select the certificate (.json) to check against",
+                                                          AppPaths::certificatesDir(), "JSON Files (*.json)");
+    if (fileName.isEmpty()) return;
+    CertManager certManager;
+    QString message;
+    const bool ok = certManager.verifyQrPayload(fileName, payload, &message);
+    resultText->setText(QString("QR verification: %1\n\n%2").arg(ok ? "MATCH" : "FAILED", message));
 }
 
 void CertificateWidget::onOpenCertificateFolder() {
-    QString documentsPath = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-    if (documentsPath.isEmpty()) documentsPath = QDir::homePath();
-    QString certPath = QDir(documentsPath).filePath("PurgeX/certificates");
-    QDir().mkpath(certPath);
+    const QString certPath = AppPaths::ensureDir(AppPaths::certificatesDir());
     QDesktopServices::openUrl(QUrl::fromLocalFile(certPath));
 }
 
 void CertificateWidget::onOpenLogsFolder() {
-    QString documentsPath = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-    if (documentsPath.isEmpty()) documentsPath = QDir::homePath();
-    QString logsPath = QDir(documentsPath).filePath("PurgeX/logs");
-    QDir().mkpath(logsPath);
+    const QString logsPath = AppPaths::ensureDir(AppPaths::logsDir());
     QDesktopServices::openUrl(QUrl::fromLocalFile(logsPath));
 }

@@ -1,3 +1,4 @@
+#pragma once
 // test_wipe_verify.cpp
 // Unit tests for WipeEngine verification functionality
 //
@@ -85,4 +86,3 @@ private slots:
     }
 };
 
-#include "test_wipe_verify.moc"

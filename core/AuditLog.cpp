@@ -1,8 +1,13 @@
 #include "AuditLog.h"
 
+#include "AppPaths.h"
+
 #include <QDir>
 #include <QFile>
-#include <QStandardPaths>
+#include <QSaveFile>
+#include <QFileInfo>
+#include <QDateTime>
+#include <algorithm>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -51,13 +56,9 @@ AuditEntry AuditEntry::fromJson(const QJsonObject &obj)
 // ---------------------------------------------------------------------------
 AuditLog::AuditLog(QObject *parent) : QObject(parent)
 {
-    // Resolve storage path: Documents/PurgeX/audit_log.json
-    QString base = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-    if (base.isEmpty()) base = QDir::homePath();
-
-    QDir dir(QDir(base).filePath("PurgeX"));
-    if (!dir.exists()) dir.mkpath(".");
-    m_logPath = dir.filePath("audit_log.json");
+    // Resolve storage path: <data root>/audit_log.json (Documents/PurgeX by default)
+    AppPaths::ensureDir(AppPaths::dataRoot());
+    m_logPath = AppPaths::auditLogPath();
 
     load(); // Load any existing records on construction
 }
@@ -78,7 +79,12 @@ bool AuditLog::load()
     QJsonParseError pe;
     QJsonDocument doc = QJsonDocument::fromJson(data, &pe);
     if (pe.error != QJsonParseError::NoError || !doc.isArray()) {
-        qWarning() << "AuditLog: invalid JSON in log file — starting fresh.";
+        // Never silently overwrite an unreadable log: keep it for inspection.
+        const QString backup = m_logPath + ".corrupt-" +
+                               QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+        QFile::copy(m_logPath, backup);
+        qWarning() << "AuditLog: invalid JSON in log file - preserved as" << backup << "and starting fresh.";
+        m_entries.clear();
         return false;
     }
 
@@ -100,19 +106,21 @@ bool AuditLog::save() const
     for (const AuditEntry &e : reversed)
         arr.append(e.toJson());
 
-    QFile f(m_logPath);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    // QSaveFile writes to a temp file and renames, so a crash mid-write cannot
+    // truncate the existing history.
+    QSaveFile f(m_logPath);
+    if (!f.open(QIODevice::WriteOnly)) {
         qWarning() << "AuditLog: cannot open log file for writing:" << m_logPath;
         return false;
     }
 
     f.write(QJsonDocument(arr).toJson(QJsonDocument::Indented));
-    f.close();
-    return true;
+    return f.commit();
 }
 
 bool AuditLog::append(const AuditEntry &entry)
 {
+    load(); // pick up entries written by other instances since we were constructed
     m_entries.prepend(entry); // newest first in memory
     return save();
 }

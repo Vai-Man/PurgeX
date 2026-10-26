@@ -15,6 +15,9 @@
 #include <QFont>
 
 #include "../cert/CertManager.h"
+#include "../core/AuditLog.h"
+#include "../core/WipeEngine.h"
+#include <QFileInfo>
 
 // ---------------------------------------------------------------------------
 // ForensicWidget
@@ -40,7 +43,8 @@ void ForensicWidget::setupUI()
 
     // ---- Safety banner ----
     auto *banner = new QLabel(
-        "  READ-ONLY FORENSIC SCAN  |  No changes will be made to the source device or directory.", this);
+        "  READ-ONLY SOURCE  |  The scanned device or folder is never modified. "
+        "Recovered files are written only to the destination you choose.", this);
     banner->setObjectName("forensicBanner");
     banner->setStyleSheet("background:#1a3a5c;color:#7ec8e3;font-weight:bold;"
                           "padding:6px 10px;border-radius:4px;font-size:11px;");
@@ -54,7 +58,7 @@ void ForensicWidget::setupUI()
     srcRow->addWidget(new QLabel("Source (read-only):", this));
     sourceEdit = new QLineEdit(this);
     sourceEdit->setPlaceholderText("Select a folder/drive to scan for recoverable files...");
-    sourceEdit->setReadOnly(true);
+    sourceEdit->setReadOnly(false);
     sourceButton = new QPushButton("Browse...", this);
     srcRow->addWidget(sourceEdit);
     srcRow->addWidget(sourceButton);
@@ -73,8 +77,8 @@ void ForensicWidget::setupUI()
     auto *modeRow = new QHBoxLayout();
     modeRow->addWidget(new QLabel("Scan mode:", this));
     modeCombo = new QComboBox(this);
-    modeCombo->addItem("Logical Path (reads files in directory — no admin required)", 0);
-    modeCombo->addItem("Raw Device (byte-level scan — requires Administrator)", 1);
+    modeCombo->addItem("Logical Path (identify and copy files in a folder)", 0);
+    modeCombo->addItem("Raw Device / Disk Image (carve deleted files from raw sectors)", 1);
     modeRow->addWidget(modeCombo);
     modeRow->addStretch();
     pathLayout->addLayout(modeRow);
@@ -170,25 +174,44 @@ void ForensicWidget::setupUI()
 void ForensicWidget::onSelectSource()
 {
     if (modeCombo->currentIndex() == 0) {
-        // Logical path — folder picker
-        QString path = QFileDialog::getExistingDirectory(
+        const QString path = QFileDialog::getExistingDirectory(
             this, "Select Source Directory to Scan", QDir::rootPath());
         if (!path.isEmpty()) sourceEdit->setText(path);
-    } else {
-        // Raw device — warn user explicitly
-        QMessageBox::information(this, "Raw Device Scan",
-            "For raw device scanning, enter the device path directly in the source field.\n\n"
-            "Windows examples:  \\\\.\\PhysicalDrive1  or  \\\\.\\D:\n"
-            "Linux examples:    /dev/sdb   or   /dev/sdb1\n\n"
-            "WARNING: Raw device scanning requires Administrator/root privileges.\n"
-            "The source will be opened in READ-ONLY mode. No data will be modified.");
-        bool ok;
-        QString device = QInputDialog::getText(
-            this, "Enter Device Path",
-            "Device path (e.g. \\\\.\\PhysicalDrive1):", QLineEdit::Normal, "", &ok);
-        if (ok && !device.isEmpty())
-            sourceEdit->setText(device);
+        return;
     }
+
+    // Raw mode: offer detected disks, a disk-image file, or a hand-typed device path.
+    const QString browse = "Browse for a disk image file (.img, .dd, .raw, .iso)...";
+    QStringList items;
+    items << browse;
+    WipeEngine probe;
+    QStringList seen;
+    for (const DriveInfo &d : probe.detectDrives()) {
+        if (!d.physicalDevice.isEmpty() && !seen.contains(d.physicalDevice)) {
+            seen << d.physicalDevice;
+            items << QString("%1   -   whole disk (%2, %3 GB)")
+                         .arg(d.physicalDevice, d.model).arg(d.totalSize / (1024 * 1024 * 1024));
+        }
+#ifdef Q_OS_WIN
+        items << QString("%1   -   volume %2").arg(d.device, d.mountPoint);
+#endif
+    }
+
+    bool ok = false;
+    const QString choice = QInputDialog::getItem(this, "Select Raw Source",
+        "Choose a device, or type a path (Windows: \\\\.\\PhysicalDrive1 or \\\\.\\D: / Linux: /dev/sdb).\n"
+        "Raw device access needs Administrator / root. The source is opened read-only.",
+        items, 0, true, &ok);
+    if (!ok || choice.trimmed().isEmpty()) return;
+
+    if (choice == browse) {
+        const QString file = QFileDialog::getOpenFileName(this, "Select Disk Image", QDir::homePath(),
+            "Disk images (*.img *.dd *.raw *.bin *.iso *.vhd *.001);;All files (*)");
+        if (!file.isEmpty()) sourceEdit->setText(file);
+        return;
+    }
+    const int sep = choice.indexOf("   -   ");
+    sourceEdit->setText((sep > 0 ? choice.left(sep) : choice).trimmed());
 }
 
 // ---------------------------------------------------------------------------
@@ -206,24 +229,15 @@ void ForensicWidget::onSelectDestination()
 // ---------------------------------------------------------------------------
 void ForensicWidget::onStartScan()
 {
-    QString src = sourceEdit->text().trimmed();
-    QString dst = destEdit->text().trimmed();
+    const QString src = sourceEdit->text().trimmed();
+    const QString dst = destEdit->text().trimmed();
 
     if (src.isEmpty() || dst.isEmpty()) {
         QMessageBox::warning(this, "Missing Paths",
-            "Please select both a source directory/device and a destination folder.");
+            "Please select both a source (folder, device or disk image) and a destination folder.");
         return;
     }
 
-    // Safety: source and destination must differ
-    if (QDir(src) == QDir(dst)) {
-        QMessageBox::critical(this, "Safety Check Failed",
-            "Source and destination must be different directories.\n"
-            "Writing recovered files back to the source could overwrite data.");
-        return;
-    }
-
-    // Collect selected categories
     QStringList categories;
     if (chkImages->isChecked())    categories << "Image";
     if (chkDocuments->isChecked()) categories << "Document";
@@ -241,42 +255,46 @@ void ForensicWidget::onStartScan()
     ForensicConfig config;
     config.destPath   = dst;
     config.categories = categories;
+    config.sourcePath = src;
 
-    bool rawMode = (modeCombo->currentIndex() == 1);
+    const bool rawMode = (modeCombo->currentIndex() == 1);
     if (rawMode) {
-        // Raw mode: explicit confirmation required
-        auto ans = QMessageBox::warning(this, "Raw Device Scan",
-            QString("You are about to perform a raw byte-level scan of:\n\n  %1\n\n"
-                    "This will open the device in READ-ONLY mode.\n"
-                    "No data on this device will be modified.\n\n"
-                    "Confirm that you have selected the CORRECT device and not your system drive.\n\n"
-                    "Proceed?").arg(src),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (ans != QMessageBox::Yes) return;
-
+        const bool isDevice = src.startsWith("\\\\.\\") || src.startsWith("/dev/");
+        QString text = QString("You are about to run a raw, read-only scan of:\n\n  %1\n\n"
+                               "Recovered files are written to:\n\n  %2\n\n"
+                               "Make sure the destination is on a DIFFERENT disk than the source.").arg(src, dst);
+        if (isDevice && !WipeEngine::isRunningAsAdministrator())
+            text += "\n\nNote: PurgeX is not running as Administrator / root, so opening the device will probably fail.";
+        if (QMessageBox::warning(this, "Raw Scan", text + "\n\nProceed?",
+                                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
         config.mode = ForensicConfig::ScanMode::RawDevice;
-        config.sourcePath = src;
         config.rawModeConfirmed = true;
     } else {
         config.mode = ForensicConfig::ScanMode::LogicalPath;
-        config.sourcePath = src;
-        config.rawModeConfirmed = false;
     }
 
-    // Clear previous results
     results.clear();
     resultsTable->setRowCount(0);
     logText->clear();
+    scanSource = src;
+    scanMode = rawMode ? "Raw carving" : "Logical scan";
 
-    if (!engine->startScan(config)) {
-        QMessageBox::warning(this, "Scan Error",
-            "Could not start the scan. Check source path and permissions.");
+    // startScan() explains a refusal through the warning() signal (shown in the log); also tell the user.
+    QString refusal;
+    const QMetaObject::Connection c = connect(engine, &ForensicEngine::warning, this,
+                                              [&refusal](const QString &m) { refusal = m; });
+    const bool started = engine->startScan(config);
+    disconnect(c);
+    if (!started) {
+        QMessageBox::warning(this, "Scan Not Started",
+            refusal.isEmpty() ? QString("Could not start the scan. Check the source path and permissions.") : refusal);
         return;
     }
 
     setRunning(true);
-    appendLog(QString("[%1] Scan started: %2")
-        .arg(QDateTime::currentDateTime().toString("hh:mm:ss")).arg(src));
+    appendLog(QString("[%1] %2 started: %3")
+        .arg(QDateTime::currentDateTime().toString("hh:mm:ss"), scanMode, src));
 }
 
 // ---------------------------------------------------------------------------
@@ -319,18 +337,35 @@ void ForensicWidget::onScanFinished(bool success, const QString &message,
         .arg(message));
     progressLabel->setText(message);
 
+    const bool wasCancelled = message.contains("cancelled", Qt::CaseInsensitive);
+    qint64 bytes = 0;
+    for (const RecoveryResult &r : results) bytes += r.recoveredBytes;
+
+    // Every scan is part of the audit trail, whatever its outcome.
+    AuditEntry entry;
+    entry.id        = AuditLog::generateId();
+    entry.type      = "recovery";
+    entry.timestamp = QDateTime::currentDateTime();
+    entry.target    = scanSource;
+    entry.algorithm = scanMode;
+    entry.status    = success ? "success" : (wasCancelled ? "cancelled" : (results.isEmpty() ? "failed" : "partial"));
+    entry.verificationStatus = "not_applicable";
+    entry.verificationNote   = "Source was opened read-only. Each recovered file carries a SHA-256 in the report.";
+    entry.bytesProcessed = bytes;
+    entry.details = QString("%1 | destination: %2").arg(message, destEdit->text());
+    AuditLog().append(entry);
+
     if (!results.isEmpty()) {
         openDestButton->setEnabled(true);
         exportButton->setEnabled(true);
-        emit recoveryComplete(results, sourceEdit->text());
     }
+    emit recoveryComplete(results, scanSource);
 
-    if (!success && !message.contains("cancelled", Qt::CaseInsensitive)) {
-        QMessageBox::warning(this, "Scan Warning", message);
-    } else if (success) {
+    if (success) {
         QMessageBox::information(this, "Scan Complete",
-            QString("Scan complete.\n%1 file(s) identified.\nRecovered files saved to:\n%2")
-                .arg(results.size()).arg(destEdit->text()));
+            QString("%1\n\n%2 file(s) written to:\n%3").arg(message).arg(results.size()).arg(destEdit->text()));
+    } else if (!wasCancelled) {
+        QMessageBox::warning(this, "Scan Stopped", message);
     }
 }
 
@@ -366,28 +401,47 @@ void ForensicWidget::onExportReport()
     QStringList targetList;
     int recovered = 0, partial = 0, unrecoverable = 0;
     for (const RecoveryResult &r : results) {
-        targetList << QString("%1  [%2] {%3}")
-            .arg(QFileInfo(r.sourcePath).fileName())
-            .arg(r.fileType)
-            .arg(statusText(r.status));
-        if (r.status == RecoveryStatus::Recovered)          ++recovered;
+        targetList << QString("%1 | %2 | offset %3 | %4 bytes | %5 | SHA-256 %6")
+            .arg(QFileInfo(r.destinationPath).fileName(), r.fileType)
+            .arg(r.originalOffset).arg(r.recoveredBytes).arg(statusText(r.status), r.sha256);
+        if (r.status == RecoveryStatus::Recovered)               ++recovered;
         else if (r.status == RecoveryStatus::PartiallyRecovered) ++partial;
         else ++unrecoverable;
     }
 
-    d.method         = QString("Source: %1 | Recovered: %2 | Partial: %3 | Unrecoverable: %4")
-                           .arg(sourceEdit->text()).arg(recovered).arg(partial).arg(unrecoverable);
+    d.method = QString("%1 of %2 | Recovered: %3 | Partial: %4 | Unrecoverable: %5")
+                   .arg(scanMode, scanSource).arg(recovered).arg(partial).arg(unrecoverable);
     d.targets        = targetList;
     d.bytesProcessed = 0;
     for (const RecoveryResult &r : results) d.bytesProcessed += static_cast<qulonglong>(r.recoveredBytes);
+    d.device = WipeEngine::systemPassport();
     d.verificationStatus = "not_applicable";
-    d.verificationNote   = "Forensic recovery operation. No data was modified on the source device.";
+    d.verificationNote   = "Forensic recovery. The source was opened read-only; recovered files are listed "
+                           "with their SHA-256 so their integrity can be checked later.";
 
     CertManager cm;
-    cm.generateCertificates(d, this);
+    QString pdfPath;
+    if (!cm.generateCertificates(d, this, &pdfPath)) {
+        QMessageBox::warning(this, "Report", "The report could not be written.");
+        return;
+    }
+
+    AuditEntry entry;
+    entry.id        = AuditLog::generateId();
+    entry.type      = "recovery";
+    entry.timestamp = QDateTime::currentDateTime();
+    entry.target    = scanSource;
+    entry.algorithm = QString("%1 report (%2 file(s))").arg(scanMode).arg(results.size());
+    entry.status    = "success";
+    entry.verificationStatus = "not_applicable";
+    entry.certPath  = pdfPath;
+    entry.bytesProcessed = static_cast<qint64>(d.bytesProcessed);
+    entry.details   = "Forensic report exported";
+    AuditLog().append(entry);
+    emit recoveryComplete(results, scanSource);
 
     QMessageBox::information(this, "Report Generated",
-        "Forensic recovery certificate generated in Documents/PurgeX/certificates/");
+        QString("Forensic report written to:\n%1").arg(pdfPath));
 }
 
 // ---------------------------------------------------------------------------
@@ -411,10 +465,12 @@ void ForensicWidget::onModeChanged(int index)
 // ---------------------------------------------------------------------------
 void ForensicWidget::onResultDoubleClicked(int row, int /*column*/)
 {
-    if (row < 0 || row >= results.size()) return;
-    const RecoveryResult &r = results[row];
-    if (!r.destinationPath.isEmpty() && QFile::exists(r.destinationPath))
-        QDesktopServices::openUrl(QUrl::fromLocalFile(r.destinationPath));
+    // Rows can be re-sorted, so the path travels with the row instead of being looked up by index.
+    const QTableWidgetItem *item = resultsTable->item(row, 0);
+    if (!item) return;
+    const QString path = item->data(Qt::UserRole).toString();
+    if (!path.isEmpty() && QFile::exists(path))
+        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
 }
 
 // ---------------------------------------------------------------------------
@@ -439,33 +495,37 @@ void ForensicWidget::appendLog(const QString &line)
 
 void ForensicWidget::addResultRow(const RecoveryResult &r)
 {
-    int row = resultsTable->rowCount();
+    // Inserting cell by cell while sorting is on makes the row jump around mid-insert.
+    resultsTable->setSortingEnabled(false);
+    const int row = resultsTable->rowCount();
     resultsTable->insertRow(row);
 
-    QString fname = r.destinationPath.isEmpty()
+    const QString fname = r.destinationPath.isEmpty()
         ? QFileInfo(r.sourcePath).fileName()
         : QFileInfo(r.destinationPath).fileName();
 
-    resultsTable->setItem(row, 0, new QTableWidgetItem(fname));
+    auto *nameItem = new QTableWidgetItem(fname);
+    nameItem->setData(Qt::UserRole, r.destinationPath);
+    nameItem->setToolTip(QString("Source: %1\nOffset: %2\nSHA-256: %3\n%4")
+                             .arg(r.sourcePath).arg(r.originalOffset).arg(r.sha256, r.notes));
+    resultsTable->setItem(row, 0, nameItem);
     resultsTable->setItem(row, 1, new QTableWidgetItem(r.fileType));
     resultsTable->setItem(row, 2, new QTableWidgetItem(r.category));
-    resultsTable->setItem(row, 3, new QTableWidgetItem(QString::number(r.recoveredBytes)));
+    auto *sizeItem = new QTableWidgetItem;
+    sizeItem->setData(Qt::DisplayRole, r.recoveredBytes); // numeric so it sorts numerically
+    resultsTable->setItem(row, 3, sizeItem);
     resultsTable->setItem(row, 4, new QTableWidgetItem(confidenceText(r.confidence)));
     resultsTable->setItem(row, 5, new QTableWidgetItem(statusText(r.status)));
 
-    // Color-code by status
-    QColor rowColor = Qt::transparent;
-    if (r.status == RecoveryStatus::Recovered)
-        rowColor = QColor("#e6f4ea");
-    else if (r.status == RecoveryStatus::PartiallyRecovered)
-        rowColor = QColor("#fff3e0");
-    else
-        rowColor = QColor("#fce8e6");
-
-    for (int c = 0; c < 6; ++c) {
-        if (resultsTable->item(row, c))
+    QColor rowColor("#fce8e6");
+    if (r.status == RecoveryStatus::Recovered)               rowColor = QColor("#e6f4ea");
+    else if (r.status == RecoveryStatus::PartiallyRecovered) rowColor = QColor("#fff3e0");
+    for (int c = 0; c < 6; ++c)
+        if (resultsTable->item(row, c)) {
             resultsTable->item(row, c)->setBackground(rowColor);
-    }
+            resultsTable->item(row, c)->setForeground(QColor("#202124")); // readable in dark themes
+        }
+    resultsTable->setSortingEnabled(true);
 }
 
 QString ForensicWidget::confidenceText(RecoveryConfidence c) const

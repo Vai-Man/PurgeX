@@ -179,11 +179,19 @@ void AuditWidget::onClearFilter()
     populateTable(auditLog->entries());
 }
 
+// The table can be re-sorted by the user, so the entry id travels with the row.
+static QString selectedEntryId(const QTableWidget *table)
+{
+    const int row = table->currentRow();
+    if (row < 0) return QString();
+    const QTableWidgetItem *item = table->item(row, 0);
+    return item ? item->data(Qt::UserRole).toString() : QString();
+}
+
 void AuditWidget::onOpenCertificate()
 {
-    int row = table->currentRow();
-    if (row < 0 || row >= currentEntries.size()) return;
-    const AuditEntry &e = currentEntries[row];
+    const AuditEntry e = auditLog->findById(selectedEntryId(table));
+    if (e.id.isEmpty()) return;
 
     if (e.certPath.isEmpty()) {
         QMessageBox::information(this, "No Certificate", "No certificate was generated for this operation.");
@@ -200,9 +208,9 @@ void AuditWidget::onOpenCertificate()
 
 void AuditWidget::onViewDetails()
 {
-    int row = table->currentRow();
-    if (row < 0 || row >= currentEntries.size()) return;
-    showDetailDialog(currentEntries[row]);
+    const AuditEntry e = auditLog->findById(selectedEntryId(table));
+    if (e.id.isEmpty()) return;
+    showDetailDialog(e);
 }
 
 void AuditWidget::onTableSelectionChanged()
@@ -225,7 +233,9 @@ void AuditWidget::populateTable(const QList<AuditEntry> &entries)
         int row = table->rowCount();
         table->insertRow(row);
 
-        table->setItem(row, 0, new QTableWidgetItem(e.timestamp.toString("yyyy-MM-dd hh:mm")));
+        auto *timeItem = new QTableWidgetItem(e.timestamp.toString("yyyy-MM-dd hh:mm:ss"));
+        timeItem->setData(Qt::UserRole, e.id);
+        table->setItem(row, 0, timeItem);
         table->setItem(row, 1, new QTableWidgetItem(e.type));
         table->setItem(row, 2, new QTableWidgetItem(
             e.target.length() > 60 ? e.target.left(57) + "..." : e.target));
@@ -239,8 +249,10 @@ void AuditWidget::populateTable(const QList<AuditEntry> &entries)
         // Row color by status
         QColor c = statusColor(e.status);
         for (int col = 0; col < 7; ++col)
-            if (table->item(row, col))
+            if (table->item(row, col)) {
                 table->item(row, col)->setBackground(c);
+                table->item(row, col)->setForeground(QColor("#202124")); // readable in dark themes
+            }
     }
 
     table->setSortingEnabled(true);
@@ -280,8 +292,9 @@ void AuditWidget::showDetailDialog(const AuditEntry &e)
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dlg);
     if (!e.certPath.isEmpty() && QFileInfo::exists(e.certPath)) {
         auto *openBtn = new QPushButton("Open Certificate PDF", dlg);
-        connect(openBtn, &QPushButton::clicked, [&e] {
-            QDesktopServices::openUrl(QUrl::fromLocalFile(e.certPath));
+        const QString certPath = e.certPath;
+        connect(openBtn, &QPushButton::clicked, dlg, [certPath] {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(certPath));
         });
         buttons->addButton(openBtn, QDialogButtonBox::ActionRole);
     }

@@ -89,6 +89,8 @@ private:
     ForensicEngine         *engine;
     QList<RecoveryResult>   results;
     bool                    scanning;
+    QString                 scanSource;
+    QString                 scanMode;
 };
 
 #endif // PURGEX_FORENSICWIDGET_H
